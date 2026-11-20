@@ -1,11 +1,14 @@
 from fastapi import APIRouter, Body, HTTPException
 
 from app.db import connect
+from app.modules import parcel_event_type_allowlist as allowlist
 from app.seed import overdue_hours
 from app.services import bay as bay_svc
 from app.services import ingest as ingest_svc
 
 router = APIRouter(prefix="/api")
+
+REQUIRED_TYPES = ("drop", "pickup")
 
 
 @router.get("/overview")
@@ -56,12 +59,19 @@ def list_events():
 
 
 @router.get("/quarantine")
-def list_quarantine():
+def list_quarantine(kind: str | None = None):
     conn = connect()
     try:
-        rows = conn.execute(
-            "SELECT id, reason, member_json, created_at FROM quarantine ORDER BY id DESC"
-        ).fetchall()
+        sql = (
+            "SELECT id, kind, quarantine_key, batch_id, event_id, event_type,"
+            " allowlist_version, reason, member_json, created_at FROM quarantine"
+        )
+        params: tuple = ()
+        if kind:
+            sql += " WHERE kind=?"
+            params = (kind,)
+        sql += " ORDER BY id DESC"
+        rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
@@ -88,7 +98,61 @@ def run_ingest():
 def get_settings():
     conn = connect()
     try:
-        return {"overdue_hours": overdue_hours(conn)}
+        return {
+            "overdue_hours": overdue_hours(conn),
+            "event_type_allowlist": allowlist.current(conn),
+            "candidate_types": list(allowlist.CANDIDATE_TYPES),
+            "required_types": list(REQUIRED_TYPES),
+        }
+    finally:
+        conn.close()
+
+
+@router.get("/settings/event-types")
+def get_event_types():
+    conn = connect()
+    try:
+        return {
+            **allowlist.current(conn),
+            "candidate_types": list(allowlist.CANDIDATE_TYPES),
+            "required_types": list(REQUIRED_TYPES),
+            "history": allowlist.history(conn),
+        }
+    finally:
+        conn.close()
+
+
+@router.put("/settings/event-types")
+def put_event_types(body: dict = Body(...)):
+    raw = body.get("allowed")
+    parsed = body.get("parse")
+    if raw is None and isinstance(parsed, str):
+        raw = parsed.split(",") if parsed.strip() else []
+    if raw is None:
+        raise HTTPException(400, "缺少 allowed（event_type 数组）")
+    try:
+        types = allowlist.normalize_types(raw)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    missing = [t for t in REQUIRED_TYPES if t not in types]
+    if missing:
+        raise HTTPException(
+            400, f"允许集必须保留 {'/'.join(REQUIRED_TYPES)}；缺少：{', '.join(missing)}"
+        )
+    conn = connect()
+    try:
+        result = allowlist.save_allowlist(conn, types, note=str(body.get("note", ""))[:200])
+        conn.commit()
+        return result
+    finally:
+        conn.close()
+
+
+@router.get("/event-type-verify")
+def event_type_verify():
+    conn = connect()
+    try:
+        return allowlist.verification(conn)
     finally:
         conn.close()
 

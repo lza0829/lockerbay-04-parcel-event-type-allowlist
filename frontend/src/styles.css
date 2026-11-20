@@ -158,6 +158,9 @@ button, .btn {
   padding: .45rem .85rem;
 }
 button:hover { border-color: var(--signal); }
+button:disabled { opacity: .55; cursor: not-allowed; }
+button.on { border-color: var(--signal); background: rgba(240, 196, 63, .14); }
+button.locked { opacity: 1; border-style: dashed; }
 
 table { width: 100%; border-collapse: collapse; font-size: .88rem; }
 th, td { text-align: left; padding: .45rem .4rem; border-bottom: 1px solid var(--line); }

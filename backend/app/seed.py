@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timezone
 
 from app.db import FIXTURES_DIR, connect
+from app.modules import parcel_event_type_allowlist as allowlist
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (
@@ -49,13 +50,32 @@ CREATE TABLE IF NOT EXISTS quarantine (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   reason TEXT NOT NULL,
   member_json TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'generic',
+  quarantine_key TEXT,
+  batch_id TEXT,
+  event_id TEXT,
+  event_type TEXT,
+  allowlist_version INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS event_type_allowlist_version (
+  version INTEGER PRIMARY KEY,
+  created_at TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS event_type_allowlist (
+  version INTEGER NOT NULL REFERENCES event_type_allowlist_version(version),
+  event_type TEXT NOT NULL,
+  PRIMARY KEY (version, event_type)
 );
 
 CREATE TABLE IF NOT EXISTS ingest_batches (
   id TEXT PRIMARY KEY,
   created_at TEXT NOT NULL,
-  report_json TEXT NOT NULL DEFAULT '{}'
+  report_json TEXT NOT NULL DEFAULT '{}',
+  allowlist_version INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS occupancy_proofs (
@@ -76,11 +96,38 @@ def overdue_hours(conn) -> int:
     return int(row["value"]) if row else 48
 
 
+def _columns(conn, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _migrate(conn):
+    """兼容旧库：补齐搁置与批次上的允许集列。"""
+    quarantine_cols = {
+        "kind": "TEXT NOT NULL DEFAULT 'generic'",
+        "quarantine_key": "TEXT",
+        "batch_id": "TEXT",
+        "event_id": "TEXT",
+        "event_type": "TEXT",
+        "allowlist_version": "INTEGER",
+    }
+    existing = _columns(conn, "quarantine")
+    for name, decl in quarantine_cols.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE quarantine ADD COLUMN {name} {decl}")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_quarantine_key ON quarantine(quarantine_key)")
+    if "allowlist_version" not in _columns(conn, "ingest_batches"):
+        conn.execute(
+            "ALTER TABLE ingest_batches ADD COLUMN allowlist_version INTEGER NOT NULL DEFAULT 1"
+        )
+
+
 def init_db():
     conn = connect()
     conn.executescript(SCHEMA)
+    _migrate(conn)
     if not conn.execute("SELECT 1 FROM settings WHERE key='overdue_hours'").fetchone():
         conn.execute("INSERT INTO settings(key, value) VALUES ('overdue_hours', '48')")
+    allowlist.ensure_default(conn)
     if conn.execute("SELECT COUNT(*) AS c FROM cabinets").fetchone()["c"] == 0:
         _seed(conn)
     conn.commit()
